@@ -5,12 +5,16 @@ This code implements skip-gram model and continuous-bow model.
 """
 import argparse
 import collections
+from typing import Dict
+from typing import Iterable
+from typing import NamedTuple
+from typing import Union
 
 import numpy as np
-import six
 
 import chainer
 from chainer import cuda
+from chainer import Variable
 import chainer.functions as F
 import chainer.initializers as I
 import chainer.links as L
@@ -19,46 +23,56 @@ from chainer import reporter
 from chainer import training
 from chainer.training import extensions
 
+try:
+    import cupy as cp
+except ImportError:
+    cp = np
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--gpu', '-g', default=-1, type=int,
-                    help='GPU ID (negative value indicates CPU)')
-parser.add_argument('--unit', '-u', default=100, type=int,
-                    help='number of units')
-parser.add_argument('--window', '-w', default=5, type=int,
-                    help='window size')
-parser.add_argument('--batchsize', '-b', type=int, default=1000,
-                    help='learning minibatch size')
-parser.add_argument('--epoch', '-e', default=20, type=int,
-                    help='number of epochs to learn')
-parser.add_argument('--model', '-m', choices=['skipgram', 'cbow'],
-                    default='skipgram',
-                    help='model type ("skipgram", "cbow")')
-parser.add_argument('--negative-size', default=5, type=int,
-                    help='number of negative samples')
-parser.add_argument('--out-type', '-o', choices=['hsm', 'ns', 'original'],
-                    default='hsm',
-                    help='output model type ("hsm": hierarchical softmax, '
-                    '"ns": negative sampling, "original": no approximation)')
-parser.add_argument('--out', default='result',
-                    help='Directory to output the result')
-parser.add_argument('--test', dest='test', action='store_true')
-parser.set_defaults(test=False)
 
-args = parser.parse_args()
+ndarray = Union[np.ndarray, cp.ndarray]
 
-if args.gpu >= 0:
-    chainer.cuda.get_device_from_id(args.gpu).use()
-    cuda.check_cuda_available()
 
-print('GPU: {}'.format(args.gpu))
-print('# unit: {}'.format(args.unit))
-print('Window: {}'.format(args.window))
-print('Minibatch-size: {}'.format(args.batchsize))
-print('# epoch: {}'.format(args.epoch))
-print('Training model: {}'.format(args.model))
-print('Output type: {}'.format(args.out_type))
-print('')
+class ConstArguments(NamedTuple):
+    gpu: int
+    unit: int
+    window: int
+    batchsize: int
+    epoch: int
+    model: str
+    negative_size: int
+    out_type: str
+    out: str
+    test: bool
+
+
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--gpu', '-g', default=-1, type=int,
+                        help='GPU ID (negative value indicates CPU)')
+    parser.add_argument('--unit', '-u', default=100, type=int,
+                        help='number of units')
+    parser.add_argument('--window', '-w', default=5, type=int,
+                        help='window size')
+    parser.add_argument('--batchsize', '-b', type=int, default=1000,
+                        help='learning minibatch size')
+    parser.add_argument('--epoch', '-e', default=20, type=int,
+                        help='number of epochs to learn')
+    parser.add_argument('--model', '-m', choices=['skipgram', 'cbow'],
+                        default='skipgram',
+                        help='model type ("skipgram", "cbow")')
+    parser.add_argument('--negative-size', default=5, type=int,
+                        help='number of negative samples')
+    parser.add_argument('--out-type', '-o', choices=['hsm', 'ns', 'original'],
+                        default='hsm',
+                        help='output model type ("hsm": hierarchical softmax, '
+                        '"ns": negative sampling, '
+                        '"original": no approximation)')
+    parser.add_argument('--out', default='result',
+                        help='Directory to output the result')
+    parser.add_argument('--test', dest='test', action='store_true')
+    parser.set_defaults(test=False)
+
+    return ConstArguments(**vars(parser.parse_args()))
 
 
 class ContinuousBoW(chainer.Chain):
@@ -71,9 +85,13 @@ class ContinuousBoW(chainer.Chain):
                 n_vocab, n_units, initialW=I.Uniform(1. / n_units))
             self.loss_func = loss_func
 
-    def __call__(self, x, context):
+    def __call__(self, x: ndarray, context: ndarray):
+        # x.shape == (batchsize,)
+        # context.shape == (batchsize, window * 2)
         e = self.embed(context)
-        h = F.sum(e, axis=1) * (1. / context.shape[1])
+        # e.shape == (batchsize, window * 2, n_units)
+        h: Variable = F.sum(e, axis=1) * (1. / context.shape[1])
+        # h.shape == (batchsize, n_units)
         loss = self.loss_func(h, x)
         reporter.report({'loss': loss}, self)
         return loss
@@ -89,12 +107,18 @@ class SkipGram(chainer.Chain):
                 n_vocab, n_units, initialW=I.Uniform(1. / n_units))
             self.loss_func = loss_func
 
-    def __call__(self, x, context):
+    def __call__(self, x: ndarray, context: ndarray):
+        # x.shape == (batchsize,)
+        # context.shape == (batchsize, window * 2)
         e = self.embed(context)
+        # e.shape == (batchsize, window * 2, n_units)
         shape = e.shape
         x = F.broadcast_to(x[:, None], (shape[0], shape[1]))
+        # x.shape == (batchsize, window * 2)
         e = F.reshape(e, (shape[0] * shape[1], shape[2]))
+        # e.shape == (batchsize * window * 2, n_units)
         x = F.reshape(x, (shape[0] * shape[1],))
+        # x.shape == (batchsize * window * 2,)
         loss = self.loss_func(e, x)
         reporter.report({'loss': loss}, self)
         return loss
@@ -113,7 +137,13 @@ class SoftmaxCrossEntropyLoss(chainer.Chain):
 
 class WindowIterator(chainer.dataset.Iterator):
 
-    def __init__(self, dataset, window, batch_size, repeat=True):
+    def __init__(
+            self,
+            dataset: Union[np.ndarray, Iterable],
+            window: int,
+            batch_size: int,
+            repeat: bool = True
+    ):
         self.dataset = np.array(dataset, np.int32)
         self.window = window
         self.batch_size = batch_size
@@ -171,69 +201,90 @@ def convert(batch, device):
     return center, context
 
 
-if args.gpu >= 0:
-    cuda.get_device_from_id(args.gpu).use()
+def main():
+    args = get_args()
 
-train, val, _ = chainer.datasets.get_ptb_words()
-counts = collections.Counter(train)
-counts.update(collections.Counter(val))
-n_vocab = max(train) + 1
+    if args.gpu >= 0:
+        chainer.cuda.get_device_from_id(args.gpu).use()
+        cuda.check_cuda_available()
 
-if args.test:
-    train = train[:100]
-    val = val[:100]
+    print('GPU: {}'.format(args.gpu))
+    print('# unit: {}'.format(args.unit))
+    print('Window: {}'.format(args.window))
+    print('Minibatch-size: {}'.format(args.batchsize))
+    print('# epoch: {}'.format(args.epoch))
+    print('Training model: {}'.format(args.model))
+    print('Output type: {}'.format(args.out_type))
+    print('')
 
-vocab = chainer.datasets.get_ptb_words_vocabulary()
-index2word = {wid: word for word, wid in six.iteritems(vocab)}
+    train, val, _ = chainer.datasets.get_ptb_words()
+    train: np.ndarray = train
+    val: np.ndarray = val
+    counts = collections.Counter(train)
+    counts.update(collections.Counter(val))
+    n_vocab: int = max(train) + 1
 
-print('n_vocab: %d' % n_vocab)
-print('data length: %d' % len(train))
+    assert len(train.shape) == 1
+    assert len(val.shape) == 1
 
-if args.out_type == 'hsm':
-    HSM = L.BinaryHierarchicalSoftmax
-    tree = HSM.create_huffman_tree(counts)
-    loss_func = HSM(args.unit, tree)
-    loss_func.W.data[...] = 0
-elif args.out_type == 'ns':
-    cs = [counts[w] for w in range(len(counts))]
-    loss_func = L.NegativeSampling(args.unit, cs, args.negative_size)
-    loss_func.W.data[...] = 0
-elif args.out_type == 'original':
-    loss_func = SoftmaxCrossEntropyLoss(args.unit, n_vocab)
-else:
-    raise Exception('Unknown output type: {}'.format(args.out_type))
+    if args.test:
+        train: np.ndarray = train[:100]
+        val: np.ndarray = val[:100]
 
-if args.model == 'skipgram':
-    model = SkipGram(n_vocab, args.unit, loss_func)
-elif args.model == 'cbow':
-    model = ContinuousBoW(n_vocab, args.unit, loss_func)
-else:
-    raise Exception('Unknown model type: {}'.format(args.model))
+    vocab: Dict[str, int] = chainer.datasets.get_ptb_words_vocabulary()
+    index2word: Dict[int, str] = {wid: word for word, wid in vocab}
 
-if args.gpu >= 0:
-    model.to_gpu()
+    print('n_vocab: %d' % n_vocab)
+    print('data length: %d' % len(train))
+
+    if args.out_type == 'hsm':
+        HSM = L.BinaryHierarchicalSoftmax
+        tree = HSM.create_huffman_tree(counts)
+        loss_func = HSM(args.unit, tree)
+        loss_func.W.data[...] = 0
+    elif args.out_type == 'ns':
+        cs = [counts[w] for w in range(len(counts))]
+        loss_func = L.NegativeSampling(args.unit, cs, args.negative_size)
+        loss_func.W.data[...] = 0
+    elif args.out_type == 'original':
+        loss_func = SoftmaxCrossEntropyLoss(args.unit, n_vocab)
+    else:
+        raise Exception('Unknown output type: {}'.format(args.out_type))
+
+    if args.model == 'skipgram':
+        model = SkipGram(n_vocab, args.unit, loss_func)
+    elif args.model == 'cbow':
+        model = ContinuousBoW(n_vocab, args.unit, loss_func)
+    else:
+        raise Exception('Unknown model type: {}'.format(args.model))
+
+    if args.gpu >= 0:
+        model.to_gpu()
+
+    optimizer = O.Adam()
+    optimizer.setup(model)
+
+    train_iter = WindowIterator(train, args.window, args.batchsize)
+    val_iter = WindowIterator(val, args.window, args.batchsize, repeat=False)
+    updater = training.StandardUpdater(
+        train_iter, optimizer, converter=convert, device=args.gpu)
+    trainer = training.Trainer(updater, (args.epoch, 'epoch'), out=args.out)
+
+    trainer.extend(extensions.Evaluator(
+        val_iter, model, converter=convert, device=args.gpu))
+    trainer.extend(extensions.LogReport())
+    trainer.extend(extensions.PrintReport(
+        ['epoch', 'main/loss', 'validation/main/loss']))
+    trainer.extend(extensions.ProgressBar())
+    trainer.run()
+
+    with open('word2vec.model', 'w') as f:
+        f.write('%d %d\n' % (len(index2word), args.unit))
+        w = cuda.to_cpu(model.embed.W.data)
+        for i, wi in enumerate(w):
+            v = ' '.join(map(str, wi))
+            f.write('%s %s\n' % (index2word[i], v))
 
 
-optimizer = O.Adam()
-optimizer.setup(model)
-
-train_iter = WindowIterator(train, args.window, args.batchsize)
-val_iter = WindowIterator(val, args.window, args.batchsize, repeat=False)
-updater = training.StandardUpdater(
-    train_iter, optimizer, converter=convert, device=args.gpu)
-trainer = training.Trainer(updater, (args.epoch, 'epoch'), out=args.out)
-
-trainer.extend(extensions.Evaluator(
-    val_iter, model, converter=convert, device=args.gpu))
-trainer.extend(extensions.LogReport())
-trainer.extend(extensions.PrintReport(
-    ['epoch', 'main/loss', 'validation/main/loss']))
-trainer.extend(extensions.ProgressBar())
-trainer.run()
-
-with open('word2vec.model', 'w') as f:
-    f.write('%d %d\n' % (len(index2word), args.unit))
-    w = cuda.to_cpu(model.embed.W.data)
-    for i, wi in enumerate(w):
-        v = ' '.join(map(str, wi))
-        f.write('%s %s\n' % (index2word[i], v))
+if __name__ == '__main__':
+    main()
