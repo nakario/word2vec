@@ -1,7 +1,7 @@
 # Fork of chainer/chainer/examples/word2vec
 
 This is a fork of chainer's example.
-See LICENSES/chainer to check the original license.
+See [LICENSES/chainer](https://github.com/nakario/word2vec/blob/master/LICENSES/chainer) to check the original license.
 
 
 The following is the original README
