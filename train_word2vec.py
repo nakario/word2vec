@@ -22,6 +22,7 @@ import chainer.optimizers as O
 from chainer import reporter
 from chainer import training
 from chainer.training import extensions
+from chainer.utils import WalkerAlias
 
 try:
     import cupy as cp
@@ -73,6 +74,61 @@ def get_args():
     parser.set_defaults(test=False)
 
     return ConstArguments(**vars(parser.parse_args()))
+
+
+class CBoW_NS_VV(chainer.Chain):
+
+    def __init__(
+            self,
+            n_vocab: int,
+            n_units: int,
+            n_sample: int,
+            counts,
+            power: float = 0.75,
+            ignore_label: int = -1
+    ):
+        super(CBoW_NS_VV, self).__init__()
+
+        with self.init_scope():
+            self.embed_in = L.EmbedID(
+                n_vocab, n_units, initialW=I.Uniform(1. / n_units))
+            self.embed_out = L.EmbedID(
+                n_vocab, n_units, initialW=0
+            )
+            p = self.xp.array(counts, 'f')
+            power = self.xp.float32(power)
+            self.xp.power(p, power, p)  # p = self.xp.power(p, power)
+            self.sampler = WalkerAlias(p)
+            self.n_units = n_units
+            self.n_sample = n_sample
+            self.ignore_label = ignore_label
+            signs = self.xp.ones(self.n_sample + 1, 'f')
+            signs[0] = self.xp.float32(-1.)
+            self.signs = signs
+
+    def __call__(self, x: ndarray, context: ndarray):
+        # x.shape == (batchsize,)
+        # context.shape == (batchsize, context_size)
+        shape = context.shape
+        e = self.embed_in(context)
+        # e.shape == (batchsize, context_size, n_units)
+        h: Variable = F.sum(e, axis=1) * (1. / shape[1])
+        # h.shape == (batchsize, n_units)
+        samples = self.sampler.sample((shape[0], self.n_sample + 1))
+        # samples.shape == (batchsize, n_sample + 1)
+        samples[:, 0] = x
+        w = self.embed_out(samples)
+        # w.shape == (batchsize, n_sample + 1, n_units)
+        wh = F.squeeze(F.matmul(w, h[:, :, None]))
+        # wh.shape == (batchsize, n_sample + 1)
+        wh = F.scale(wh, self.signs, axis=1)
+        y = F.sum(-F.log(F.sigmoid(wh)), axis=1)
+        # y.shape == (batchsize,)
+        ignore_mask = (x != self.ignore_label)
+        loss = F.sum(F.where(ignore_mask, y, self.xp.zeros(shape[0], 'f')))
+        # loss.shape == (batchsize,)
+        reporter.report({'loss': loss}, self)
+        return loss
 
 
 class ContinuousBoW(chainer.Chain):
@@ -254,7 +310,8 @@ def main():
     if args.model == 'skipgram':
         model = SkipGram(n_vocab, args.unit, loss_func)
     elif args.model == 'cbow':
-        model = ContinuousBoW(n_vocab, args.unit, loss_func)
+        cs = [counts[w] for w in range(len(counts))]
+        model = CBoW_NS_VV(n_vocab, args.unit, args.negative_size, cs)
     else:
         raise Exception('Unknown model type: {}'.format(args.model))
 
