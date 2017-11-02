@@ -232,7 +232,7 @@ def main():
         val: np.ndarray = val[:100]
 
     vocab: Dict[str, int] = chainer.datasets.get_ptb_words_vocabulary()
-    index2word: Dict[int, str] = {wid: word for word, wid in vocab}
+    index2word: Dict[int, str] = {wid: word for word, wid in vocab.items()}
 
     print('n_vocab: %d' % n_vocab)
     print('data length: %d' % len(train))
