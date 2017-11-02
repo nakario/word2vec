@@ -90,7 +90,7 @@ class CBoW_NS_VV(chainer.Chain):
         super(CBoW_NS_VV, self).__init__()
 
         with self.init_scope():
-            self.embed_in = L.EmbedID(
+            self.embed = L.EmbedID(
                 n_vocab, n_units, initialW=I.Uniform(1. / n_units))
             self.embed_out = L.EmbedID(
                 n_vocab, n_units, initialW=0
@@ -102,15 +102,21 @@ class CBoW_NS_VV(chainer.Chain):
             self.n_units = n_units
             self.n_sample = n_sample
             self.ignore_label = ignore_label
-            signs = self.xp.ones(self.n_sample + 1, 'f')
-            signs[0] = self.xp.float32(-1.)
-            self.signs = signs
+
+    def to_cpu(self):
+        super(CBoW_NS_VV, self).to_cpu()
+        self.sampler.to_cpu()
+
+    def to_gpu(self, device=None):
+        with cuda._get_device(device):
+            super(CBoW_NS_VV, self).to_gpu()
+            self.sampler.to_gpu()
 
     def __call__(self, x: ndarray, context: ndarray):
         # x.shape == (batchsize,)
         # context.shape == (batchsize, context_size)
         shape = context.shape
-        e = self.embed_in(context)
+        e = self.embed(context)
         # e.shape == (batchsize, context_size, n_units)
         h: Variable = F.sum(e, axis=1) * (1. / shape[1])
         # h.shape == (batchsize, n_units)
@@ -121,7 +127,9 @@ class CBoW_NS_VV(chainer.Chain):
         # w.shape == (batchsize, n_sample + 1, n_units)
         wh = F.squeeze(F.matmul(w, h[:, :, None]))
         # wh.shape == (batchsize, n_sample + 1)
-        wh = F.scale(wh, self.signs, axis=1)
+        signs = self.xp.ones(self.n_sample + 1, 'f')
+        signs[0] = self.xp.float32(-1.)
+        wh = F.scale(wh, signs, axis=1)
         y = F.sum(-F.log(F.sigmoid(wh)), axis=1)
         # y.shape == (batchsize,)
         ignore_mask = (x != self.ignore_label)
