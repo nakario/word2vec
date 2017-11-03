@@ -36,6 +36,7 @@ ndarray = Union[np.ndarray, cp.ndarray]
 class ConstArguments(NamedTuple):
     gpu: int
     unit: int
+    ambiguity: int
     window: int
     batchsize: int
     epoch: int
@@ -52,6 +53,8 @@ def get_args():
                         help='GPU ID (negative value indicates CPU)')
     parser.add_argument('--unit', '-u', default=100, type=int,
                         help='number of units')
+    parser.add_argument('--ambiguity', '-a', default=10, type=int,
+                        help='ambiguity of words')
     parser.add_argument('--window', '-w', default=5, type=int,
                         help='window size')
     parser.add_argument('--batchsize', '-b', type=int, default=1000,
@@ -131,6 +134,72 @@ class CBoW_NS_VV(chainer.Chain):
         signs[0] = self.xp.float32(-1.)
         wh = F.scale(wh, signs, axis=1)
         y = F.sum(-F.log(F.sigmoid(wh)), axis=1)
+        # y.shape == (batchsize,)
+        ignore_mask = (x != self.ignore_label)
+        loss = F.sum(F.where(ignore_mask, y, self.xp.zeros(shape[0], 'f')))
+        # loss.shape == (batchsize,)
+        reporter.report({'loss': loss}, self)
+        return loss
+
+
+class CBoW_NS_VM(chainer.Chain):
+
+    def __init__(
+            self,
+            n_vocab: int,
+            n_units: int,
+            ambiguity: int,
+            n_sample: int,
+            counts,
+            power: float = 0.75,
+            ignore_label: int = -1
+    ):
+        super(CBoW_NS_VM, self).__init__()
+
+        with self.init_scope():
+            self.embed = L.EmbedID(
+                n_vocab, n_units, initialW=I.Uniform(1. / n_units))
+            self.embed_out = L.EmbedID(
+                n_vocab, n_units * ambiguity, initialW=0
+            )
+            p = self.xp.array(counts, 'f')
+            power = self.xp.float32(power)
+            self.xp.power(p, power, p)  # p = self.xp.power(p, power)
+            self.sampler = WalkerAlias(p)
+            self.n_units = n_units
+            self.ambiguity = ambiguity
+            self.n_sample = n_sample
+            self.ignore_label = ignore_label
+
+    def __call__(self, x: ndarray, context: ndarray):
+        # x.shape == (batchsize,)
+        # context.shape == (batchsize, context_size)
+        shape = context.shape
+        e = self.embed(context)
+        # e.shape == (batchsize, context_size, n_units)
+        h: Variable = F.sum(e, axis=1) * (1. / shape[1])
+        h = F.broadcast_to(
+            h[:, None, :, None],
+            (shape[0], self.ambiguity, self.n_units, 1)
+        )
+        # h.shape == (batchsize, ambiguity, n_units, 1)
+        samples = self.sampler.sample((shape[0], self.n_sample + 1))
+        # samples.shape == (batchsize, n_sample + 1)
+        samples[:, 0] = x
+        w = self.embed_out(samples)
+        # w.shape == (batchsize, n_sample + 1, n_units * ambiguity)
+        w = F.reshape(
+            w,
+            (shape[0], self.n_sample + 1, self.ambiguity, self.n_units)
+        )
+        w = F.swapaxes(w, axis1=1, axis2=2)
+        # w.shape == (batchsize, ambiguity, n_sample + 1, n_units)
+        wh = F.squeeze(F.matmul(w, h))
+        # wh.shape == (batchsize, ambiguity, n_sample + 1)
+        signs = self.xp.ones(self.n_sample + 1, 'f')
+        signs[0] = self.xp.float32(-1.)
+        wh = F.scale(wh, signs, axis=2)
+        y = F.sum(F.min(-F.log(F.sigmoid(wh)), axis=1), axis=1)
         # y.shape == (batchsize,)
         ignore_mask = (x != self.ignore_label)
         loss = F.sum(F.where(ignore_mask, y, self.xp.zeros(shape[0], 'f')))
@@ -319,7 +388,8 @@ def main():
         model = SkipGram(n_vocab, args.unit, loss_func)
     elif args.model == 'cbow':
         cs = [counts[w] for w in range(len(counts))]
-        model = CBoW_NS_VV(n_vocab, args.unit, args.negative_size, cs)
+        model = CBoW_NS_VM(n_vocab, args.unit, args.ambiguity,
+                           args.negative_size, cs)
     else:
         raise Exception('Unknown model type: {}'.format(args.model))
 
