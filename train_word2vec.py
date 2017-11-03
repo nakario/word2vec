@@ -171,6 +171,15 @@ class CBoW_NS_VM(chainer.Chain):
             self.n_sample = n_sample
             self.ignore_label = ignore_label
 
+    def to_cpu(self):
+        super(CBoW_NS_VM, self).to_cpu()
+        self.sampler.to_cpu()
+
+    def to_gpu(self, device=None):
+        with cuda._get_device(device):
+            super(CBoW_NS_VM, self).to_gpu()
+            self.sampler.to_gpu()
+
     def __call__(self, x: ndarray, context: ndarray):
         # x.shape == (batchsize,)
         # context.shape == (batchsize, context_size)
