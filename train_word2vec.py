@@ -142,7 +142,7 @@ class CBoW_NS_VV(chainer.Chain):
         return loss
 
 
-class CBoW_NS_VM(chainer.Chain):
+class CBoW_NS_VA(chainer.Chain):
 
     def __init__(
             self,
@@ -154,7 +154,7 @@ class CBoW_NS_VM(chainer.Chain):
             power: float = 0.75,
             ignore_label: int = -1
     ):
-        super(CBoW_NS_VM, self).__init__()
+        super(CBoW_NS_VA, self).__init__()
 
         with self.init_scope():
             self.embed = L.EmbedID(
@@ -172,12 +172,12 @@ class CBoW_NS_VM(chainer.Chain):
             self.ignore_label = ignore_label
 
     def to_cpu(self):
-        super(CBoW_NS_VM, self).to_cpu()
+        super(CBoW_NS_VA, self).to_cpu()
         self.sampler.to_cpu()
 
     def to_gpu(self, device=None):
         with cuda._get_device(device):
-            super(CBoW_NS_VM, self).to_gpu()
+            super(CBoW_NS_VA, self).to_gpu()
             self.sampler.to_gpu()
 
     def __call__(self, x: ndarray, context: ndarray):
@@ -212,6 +212,80 @@ class CBoW_NS_VM(chainer.Chain):
         # wh.shape == (batchsize, n_sample + 1)
         eps = self.xp.float32(2e-5)
         y = F.sum(-F.log(F.sigmoid(wh) + eps), axis=1)
+        # y.shape == (batchsize,)
+        ignore_mask = (x != self.ignore_label)
+        loss = F.sum(F.where(ignore_mask, y, self.xp.zeros(shape[0], 'f')))
+        # loss.shape == (batchsize,)
+        reporter.report({'loss': loss}, self)
+        return loss
+
+
+class CBoW_NS_VM(chainer.Chain):
+
+    def __init__(
+            self,
+            n_vocab: int,
+            n_units: int,
+            n_sample: int,
+            counts,
+            power: float = 0.75,
+            ignore_label: int = -1
+    ):
+        super(CBoW_NS_VM, self).__init__()
+
+        with self.init_scope():
+            self.embed = L.EmbedID(
+                n_vocab, n_units, initialW=I.Uniform(1. / n_units))
+            self.embed_out = L.EmbedID(
+                n_vocab, n_units * n_units, initialW=0
+            )
+            p = self.xp.array(counts, 'f')
+            power = self.xp.float32(power)
+            self.xp.power(p, power, p)  # p = self.xp.power(p, power)
+            self.sampler = WalkerAlias(p)
+            self.n_units = n_units
+            self.n_sample = n_sample
+            self.ignore_label = ignore_label
+
+    def to_cpu(self):
+        super(CBoW_NS_VM, self).to_cpu()
+        self.sampler.to_cpu()
+
+    def to_gpu(self, device=None):
+        with cuda._get_device(device):
+            super(CBoW_NS_VM, self).to_gpu()
+            self.sampler.to_gpu()
+
+    def __call__(self, x: ndarray, context: ndarray):
+        # x.shape == (batchsize,)
+        # context.shape == (batchsize, context_size)
+        shape = context.shape
+        e = self.embed(context)
+        # e.shape == (batchsize, context_size, n_units)
+        h: Variable = F.sum(e, axis=1) * (1. / shape[1])
+        h = F.broadcast_to(
+            h[:, None, :, None],
+            (shape[0], self.n_sample + 1, self.n_units, 1)
+        )
+        # h.shape == (batchsize, n_sample + 1, n_units, 1)
+        samples = self.sampler.sample((shape[0], self.n_sample + 1))
+        # samples.shape == (batchsize, n_sample + 1)
+        samples[:, 0] = x
+        w = self.embed_out(samples)
+        # w.shape == (batchsize, n_sample + 1, n_units * n_units)
+        w = F.reshape(
+            w,
+            (shape[0], self.n_sample + 1, self.n_units, self.n_units)
+        )
+        wh = F.squeeze(F.matmul(w, h))
+        # wh.shape == (batchsize, n_sample + 1, n_units)
+        whh = F.squeeze(F.matmul(wh[:, :, None, :], h)) / \
+            F.sum(F.absolute(wh), axis=2) / \
+            F.sum(F.absolute(F.squeeze(h)), axis=2)
+        # whh.shape == (batchsize, n_sample + 1)
+        t = self.xp.zeros_like(whh, 'f')
+        t[:, 0] = self.xp.ones((shape[0],), 'f')
+        y = F.sum(F.absolute(whh - t), axis=1)
         # y.shape == (batchsize,)
         ignore_mask = (x != self.ignore_label)
         loss = F.sum(F.where(ignore_mask, y, self.xp.zeros(shape[0], 'f')))
@@ -400,8 +474,7 @@ def main():
         model = SkipGram(n_vocab, args.unit, loss_func)
     elif args.model == 'cbow':
         cs = [counts[w] for w in range(len(counts))]
-        model = CBoW_NS_VM(n_vocab, args.unit, args.ambiguity,
-                           args.negative_size, cs)
+        model = CBoW_NS_VM(n_vocab, args.unit, args.negative_size, cs)
     else:
         raise Exception('Unknown model type: {}'.format(args.model))
 
