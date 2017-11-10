@@ -279,9 +279,10 @@ class CBoW_NS_VM(chainer.Chain):
         )
         wh = F.squeeze(F.matmul(w, h))
         # wh.shape == (batchsize, n_sample + 1, n_units)
+        eps = self.xp.float32(2e-5)
         whh = F.squeeze(F.matmul(wh[:, :, None, :], h)) / \
-            F.sum(F.absolute(wh), axis=2) / \
-            F.sum(F.absolute(F.squeeze(h)), axis=2)
+            F.sum(F.absolute(wh) + eps, axis=2) / \
+            F.sum(F.absolute(F.squeeze(h)) + eps, axis=2)
         # whh.shape == (batchsize, n_sample + 1)
         t = self.xp.zeros_like(whh, 'f')
         t[:, 0] = self.xp.ones((shape[0],), 'f')
